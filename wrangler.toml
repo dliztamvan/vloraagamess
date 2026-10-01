@@ -1,5 +1,5 @@
 name = "velora-backend"
-main = "src/index.js"
+main = "index.js"
 compatibility_date = "2026-09-30"
 
 [[d1_databases]]
