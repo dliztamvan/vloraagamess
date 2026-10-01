@@ -5,4 +5,4 @@ compatibility_date = "2026-09-30"
 [[d1_databases]]
 binding = "DB"
 database_name = "velora"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "38dcd4c9-af92-465c-aedd-7d98ac1c438d"
