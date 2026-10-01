@@ -13,9 +13,7 @@ function json(data, status = 200) {
 }
 
 const now = () => Date.now();
-
 const makeId = () => crypto.randomUUID();
-
 const encoder = new TextEncoder();
 
 async function sha256(text) {
@@ -31,6 +29,13 @@ async function sha256(text) {
 
 async function readBody(request) {
   try {
+    const contentType =
+      request.headers.get("content-type") || "";
+
+    if (!contentType.includes("application/json")) {
+      return {};
+    }
+
     return await request.json();
   } catch {
     return {};
@@ -38,10 +43,14 @@ async function readBody(request) {
 }
 
 function fee(price) {
-  price = Number(price);
+  const p = Number(price);
 
-  if (price < 100000) return 1000;
-  if (price < 1000000) return 2500;
+  if (!Number.isFinite(p) || p < 0) {
+    return 0;
+  }
+
+  if (p < 100000) return 1000;
+  if (p < 1000000) return 2500;
 
   return 5000;
 }
@@ -65,7 +74,7 @@ async function getUser(request, env) {
     return null;
   }
 
-  const token = authorization.slice(7);
+  const token = authorization.slice(7).trim();
 
   if (!token) {
     return null;
@@ -74,12 +83,18 @@ async function getUser(request, env) {
   return await env.DB.prepare(`
     SELECT u.*
     FROM sessions s
-    JOIN users u ON u.id = s.user_id
+    INNER JOIN users u
+      ON u.id = s.user_id
     WHERE s.token = ?
       AND s.expires_at > ?
+    LIMIT 1
   `)
     .bind(token, now())
     .first();
+}
+
+function isAdmin(user) {
+  return user && user.role === "admin";
 }
 
 async function encryptDelivery(text, secret) {
@@ -106,14 +121,15 @@ async function encryptDelivery(text, secret) {
     new Uint8Array(12)
   );
 
-  const encrypted = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv
-    },
-    key,
-    encoder.encode(text)
-  );
+  const encrypted =
+    await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv
+      },
+      key,
+      encoder.encode(text)
+    );
 
   const result = new Uint8Array(
     iv.length + encrypted.byteLength
@@ -130,21 +146,23 @@ async function encryptDelivery(text, secret) {
   );
 }
 
-async function requireAdmin(user) {
-  return user && user.role === "admin";
-}
-
 async function route(request, env) {
   const url = new URL(request.url);
   const path = url.pathname;
-  const method = request.method;
+  const method = request.method.toUpperCase();
+
+  // =========================
+  // CORS
+  // =========================
 
   if (method === "OPTIONS") {
-    return json({ ok: true });
+    return json({
+      ok: true
+    });
   }
 
   // =========================
-  // HEALTH CHECK
+  // HEALTH
   // =========================
 
   if (
@@ -154,7 +172,7 @@ async function route(request, env) {
     return json({
       ok: true,
       service: "Velora Backend",
-      version: "10",
+      version: "10.1",
       database: "Cloudflare D1",
       time: now()
     });
@@ -170,60 +188,62 @@ async function route(request, env) {
   ) {
     const body = await readBody(request);
 
-    const name = String(body.name || "").trim();
-    const email = String(body.email || "")
-      .trim()
-      .toLowerCase();
-    const password = String(body.password || "");
+    const name =
+      String(body.name || "").trim();
+
+    const email =
+      String(body.email || "")
+        .trim()
+        .toLowerCase();
+
+    const password =
+      String(body.password || "");
 
     if (!name || !email || !password) {
-      return json(
-        {
-          error:
-            "Nama, email dan password wajib diisi"
-        },
-        400
-      );
+      return json({
+        error:
+          "Nama, email dan password wajib diisi"
+      }, 400);
+    }
+
+    if (name.length < 2) {
+      return json({
+        error:
+          "Nama minimal 2 karakter"
+      }, 400);
     }
 
     if (
       !/^[^@\s]+@gmail\.com$/i.test(email)
     ) {
-      return json(
-        {
-          error:
-            "Gunakan alamat Gmail"
-        },
-        400
-      );
+      return json({
+        error:
+          "Gunakan alamat Gmail"
+      }, 400);
     }
 
     if (password.length < 6) {
-      return json(
-        {
-          error:
-            "Password minimal 6 karakter"
-        },
-        400
-      );
+      return json({
+        error:
+          "Password minimal 6 karakter"
+      }, 400);
     }
 
-    const exists = await env.DB.prepare(`
-      SELECT id
-      FROM users
-      WHERE email = ?
-    `)
-      .bind(email)
-      .first();
+    const exists =
+      await env.DB.prepare(`
+        SELECT id
+        FROM users
+        WHERE email = ?
+        LIMIT 1
+      `)
+        .bind(email)
+        .first();
 
     if (exists) {
-      return json(
-        {
-          error:
-            "Email sudah terdaftar"
-        },
-        409
-      );
+      return json({
+        error:
+          "Email sudah terdaftar"
+      }, 409);
     }
 
     const userId = makeId();
@@ -245,7 +265,8 @@ async function route(request, env) {
         balance,
         created_at
       )
-      VALUES (?, ?, ?, ?, 'user', 0, 0, ?)
+      VALUES
+      (?, ?, ?, ?, 'user', 0, 0, ?)
     `)
       .bind(
         userId,
@@ -260,7 +281,7 @@ async function route(request, env) {
       ok: true,
       message:
         "Akun berhasil dibuat"
-    });
+    }, 201);
   }
 
   // =========================
@@ -273,32 +294,36 @@ async function route(request, env) {
   ) {
     const body = await readBody(request);
 
-    const email = String(
-      body.email || ""
-    )
-      .trim()
-      .toLowerCase();
+    const email =
+      String(body.email || "")
+        .trim()
+        .toLowerCase();
 
-    const password = String(
-      body.password || ""
-    );
+    const password =
+      String(body.password || "");
 
-    const user = await env.DB.prepare(`
-      SELECT *
-      FROM users
-      WHERE email = ?
-    `)
-      .bind(email)
-      .first();
+    if (!email || !password) {
+      return json({
+        error:
+          "Email dan password wajib diisi"
+      }, 400);
+    }
+
+    const user =
+      await env.DB.prepare(`
+        SELECT *
+        FROM users
+        WHERE email = ?
+        LIMIT 1
+      `)
+        .bind(email)
+        .first();
 
     if (!user) {
-      return json(
-        {
-          error:
-            "Email atau password salah"
-        },
-        401
-      );
+      return json({
+        error:
+          "Email atau password salah"
+      }, 401);
     }
 
     const passwordHash =
@@ -310,13 +335,10 @@ async function route(request, env) {
       passwordHash !==
       user.password_hash
     ) {
-      return json(
-        {
-          error:
-            "Email atau password salah"
-        },
-        401
-      );
+      return json({
+        error:
+          "Email atau password salah"
+      }, 401);
     }
 
     const token =
@@ -346,12 +368,13 @@ async function route(request, env) {
     return json({
       ok: true,
       token,
+      expires_at: expires,
       user: publicUser(user)
     });
   }
 
   // =========================
-  // AUTHENTICATED ROUTES
+  // AUTH CHECK
   // =========================
 
   const user =
@@ -361,13 +384,10 @@ async function route(request, env) {
     );
 
   if (!user) {
-    return json(
-      {
-        error:
-          "Unauthorized"
-      },
-      401
-    );
+    return json({
+      error:
+        "Unauthorized"
+    }, 401);
   }
 
   // =========================
@@ -379,6 +399,7 @@ async function route(request, env) {
     method === "GET"
   ) {
     return json({
+      ok: true,
       user: publicUser(user)
     });
   }
@@ -393,8 +414,7 @@ async function route(request, env) {
   ) {
     const q =
       String(
-        url.searchParams.get("q") ||
-        ""
+        url.searchParams.get("q") || ""
       )
         .trim()
         .toLowerCase();
@@ -405,7 +425,7 @@ async function route(request, env) {
         u.name AS seller_name,
         u.verified AS seller_verified
       FROM products p
-      JOIN users u
+      INNER JOIN users u
         ON u.id = p.seller_id
       WHERE p.active = 1
     `;
@@ -415,16 +435,14 @@ async function route(request, env) {
     if (q) {
       sql += `
         AND lower(
-          p.title || ' ' ||
-          p.game || ' ' ||
-          p.description || ' ' ||
-          u.name
+          COALESCE(p.title, '') || ' ' ||
+          COALESCE(p.game, '') || ' ' ||
+          COALESCE(p.description, '') || ' ' ||
+          COALESCE(u.name, '')
         ) LIKE ?
       `;
 
-      args.push(
-        "%" + q + "%"
-      );
+      args.push(`%${q}%`);
     }
 
     sql += `
@@ -438,8 +456,9 @@ async function route(request, env) {
         .all();
 
     return json({
+      ok: true,
       products:
-        result.results
+        result.results || []
     });
   }
 
@@ -455,13 +474,10 @@ async function route(request, env) {
       user.role !== "seller" &&
       user.role !== "admin"
     ) {
-      return json(
-        {
-          error:
-            "Hanya seller yang dapat menjual"
-        },
-        403
-      );
+      return json({
+        error:
+          "Hanya seller yang dapat menjual"
+      }, 403);
     }
 
     const body =
@@ -487,13 +503,10 @@ async function route(request, env) {
       !Number.isFinite(price) ||
       price <= 0
     ) {
-      return json(
-        {
-          error:
-            "Data produk tidak valid"
-        },
-        400
-      );
+      return json({
+        error:
+          "Data produk tidak valid"
+      }, 400);
     }
 
     const productId =
@@ -511,7 +524,8 @@ async function route(request, env) {
         active,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+      VALUES
+      (?, ?, ?, ?, ?, ?, 1, ?)
     `)
       .bind(
         productId,
@@ -527,7 +541,7 @@ async function route(request, env) {
     return json({
       ok: true,
       id: productId
-    });
+    }, 201);
   }
 
   // =========================
@@ -544,7 +558,14 @@ async function route(request, env) {
     const productId =
       String(
         body.productId || ""
-      );
+      ).trim();
+
+    if (!productId) {
+      return json({
+        error:
+          "productId wajib diisi"
+      }, 400);
+    }
 
     const product =
       await env.DB.prepare(`
@@ -552,31 +573,26 @@ async function route(request, env) {
         FROM products
         WHERE id = ?
           AND active = 1
+        LIMIT 1
       `)
         .bind(productId)
         .first();
 
     if (!product) {
-      return json(
-        {
-          error:
-            "Produk tidak ditemukan"
-        },
-        404
-      );
+      return json({
+        error:
+          "Produk tidak ditemukan"
+      }, 404);
     }
 
     if (
       product.seller_id ===
       user.id
     ) {
-      return json(
-        {
-          error:
-            "Tidak dapat membeli produk sendiri"
-        },
-        400
-      );
+      return json({
+        error:
+          "Tidak dapat membeli produk sendiri"
+      }, 400);
     }
 
     const productFee =
@@ -603,7 +619,8 @@ async function route(request, env) {
         status,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting_payment', ?)
+      VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, 'waiting_payment', ?)
     `)
       .bind(
         transactionId,
@@ -629,7 +646,8 @@ async function route(request, env) {
         text,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES
+      (?, ?, ?, ?, ?, ?, ?)
     `)
       .bind(
         makeId(),
@@ -645,16 +663,16 @@ async function route(request, env) {
     return json({
       ok: true,
       id: transactionId,
-      price: product.price,
+      price: Number(product.price),
       fee: productFee,
       total,
       status:
         "waiting_payment"
-    });
+    }, 201);
   }
 
   // =========================
-  // TRANSACTIONS
+  // USER TRANSACTIONS
   // =========================
 
   if (
@@ -676,29 +694,25 @@ async function route(request, env) {
         .all();
 
     return json({
+      ok: true,
       transactions:
-        result.results
+        result.results || []
     });
   }
 
   // =========================
-  // ADMIN ALL TRANSACTIONS
+  // ADMIN TRANSACTIONS
   // =========================
 
   if (
     path === "/api/admin/transactions" &&
     method === "GET"
   ) {
-    if (
-      !(await requireAdmin(user))
-    ) {
-      return json(
-        {
-          error:
-            "Admin only"
-        },
-        403
-      );
+    if (!isAdmin(user)) {
+      return json({
+        error:
+          "Admin only"
+      }, 403);
     }
 
     const result =
@@ -711,8 +725,9 @@ async function route(request, env) {
         .all();
 
     return json({
+      ok: true,
       transactions:
-        result.results
+        result.results || []
     });
   }
 
@@ -729,16 +744,11 @@ async function route(request, env) {
     adminStatus &&
     method === "PATCH"
   ) {
-    if (
-      !(await requireAdmin(user))
-    ) {
-      return json(
-        {
-          error:
-            "Admin only"
-        },
-        403
-      );
+    if (!isAdmin(user)) {
+      return json({
+        error:
+          "Admin only"
+      }, 403);
     }
 
     const transactionId =
@@ -750,7 +760,7 @@ async function route(request, env) {
     const status =
       String(
         body.status || ""
-      );
+      ).trim();
 
     const allowed = [
       "waiting_payment",
@@ -760,16 +770,11 @@ async function route(request, env) {
       "cancelled"
     ];
 
-    if (
-      !allowed.includes(status)
-    ) {
-      return json(
-        {
-          error:
-            "Status tidak valid"
-        },
-        400
-      );
+    if (!allowed.includes(status)) {
+      return json({
+        error:
+          "Status tidak valid"
+      }, 400);
     }
 
     const transaction =
@@ -777,18 +782,16 @@ async function route(request, env) {
         SELECT *
         FROM transactions
         WHERE id = ?
+        LIMIT 1
       `)
         .bind(transactionId)
         .first();
 
     if (!transaction) {
-      return json(
-        {
-          error:
-            "Transaksi tidak ditemukan"
-        },
-        404
-      );
+      return json({
+        error:
+          "Transaksi tidak ditemukan"
+      }, 404);
     }
 
     await env.DB.prepare(`
@@ -813,7 +816,8 @@ async function route(request, env) {
         text,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES
+      (?, ?, ?, ?, ?, ?, ?)
     `)
       .bind(
         makeId(),
@@ -821,8 +825,7 @@ async function route(request, env) {
         user.id,
         user.name,
         "admin",
-        "Status transaksi diubah menjadi: " +
-          status,
+        "Status transaksi diubah menjadi: " + status,
         now()
       )
       .run();
@@ -844,7 +847,8 @@ async function route(request, env) {
 
   if (
     messageRoute &&
-    method === "GET"
+    (method === "GET" ||
+      method === "POST")
   ) {
     const transactionId =
       messageRoute[1];
@@ -859,6 +863,7 @@ async function route(request, env) {
             OR seller_id = ?
             OR ? = 'admin'
           )
+        LIMIT 1
       `)
         .bind(
           transactionId,
@@ -869,65 +874,28 @@ async function route(request, env) {
         .first();
 
     if (!transaction) {
-      return json(
-        {
-          error:
-            "Forbidden"
-        },
-        403
-      );
+      return json({
+        error:
+          "Forbidden"
+      }, 403);
     }
 
-    const result =
-      await env.DB.prepare(`
-        SELECT *
-        FROM messages
-        WHERE room_id = ?
-        ORDER BY created_at ASC
-      `)
-        .bind(transactionId)
-        .all();
+    if (method === "GET") {
+      const result =
+        await env.DB.prepare(`
+          SELECT *
+          FROM messages
+          WHERE room_id = ?
+          ORDER BY created_at ASC
+        `)
+          .bind(transactionId)
+          .all();
 
-    return json({
-      messages:
-        result.results
-    });
-  }
-
-  if (
-    messageRoute &&
-    method === "POST"
-  ) {
-    const transactionId =
-      messageRoute[1];
-
-    const transaction =
-      await env.DB.prepare(`
-        SELECT *
-        FROM transactions
-        WHERE id = ?
-          AND (
-            buyer_id = ?
-            OR seller_id = ?
-            OR ? = 'admin'
-          )
-      `)
-        .bind(
-          transactionId,
-          user.id,
-          user.id,
-          user.role
-        )
-        .first();
-
-    if (!transaction) {
-      return json(
-        {
-          error:
-            "Forbidden"
-        },
-        403
-      );
+      return json({
+        ok: true,
+        messages:
+          result.results || []
+      });
     }
 
     const body =
@@ -939,13 +907,10 @@ async function route(request, env) {
       ).trim();
 
     if (!text) {
-      return json(
-        {
-          error:
-            "Pesan kosong"
-        },
-        400
-      );
+      return json({
+        error:
+          "Pesan kosong"
+      }, 400);
     }
 
     const messageId =
@@ -962,7 +927,8 @@ async function route(request, env) {
         text,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      VALUES
+      (?, ?, ?, ?, ?, ?, ?)
     `)
       .bind(
         messageId,
@@ -978,7 +944,7 @@ async function route(request, env) {
     return json({
       ok: true,
       id: messageId
-    });
+    }, 201);
   }
 
   // =========================
@@ -994,6 +960,16 @@ async function route(request, env) {
     deliveryRoute &&
     method === "POST"
   ) {
+    if (
+      user.role !== "seller" &&
+      user.role !== "admin"
+    ) {
+      return json({
+        error:
+          "Seller only"
+      }, 403);
+    }
+
     const transactionId =
       deliveryRoute[1];
 
@@ -1003,6 +979,7 @@ async function route(request, env) {
         FROM transactions
         WHERE id = ?
           AND seller_id = ?
+        LIMIT 1
       `)
         .bind(
           transactionId,
@@ -1011,26 +988,20 @@ async function route(request, env) {
         .first();
 
     if (!transaction) {
-      return json(
-        {
-          error:
-            "Seller tidak memiliki transaksi ini"
-        },
-        403
-      );
+      return json({
+        error:
+          "Seller tidak memiliki transaksi ini"
+      }, 403);
     }
 
     if (
       transaction.status !==
       "payment_verified"
     ) {
-      return json(
-        {
-          error:
-            "Pembayaran belum diverifikasi admin"
-        },
-        400
-      );
+      return json({
+        error:
+          "Pembayaran belum diverifikasi admin"
+      }, 400);
     }
 
     const body =
@@ -1049,27 +1020,19 @@ async function route(request, env) {
       );
 
     if (
-      !/^[^@\s]+@gmail\.com$/i.test(
-        email
-      )
+      !/^[^@\s]+@gmail\.com$/i.test(email)
     ) {
-      return json(
-        {
-          error:
-            "Email akun wajib Gmail"
-        },
-        400
-      );
+      return json({
+        error:
+          "Email akun wajib Gmail"
+      }, 400);
     }
 
     if (!password) {
-      return json(
-        {
-          error:
-            "Password akun wajib diisi"
-        },
-        400
-      );
+      return json({
+        error:
+          "Password akun wajib diisi"
+      }, 400);
     }
 
     const cipher =
@@ -1109,7 +1072,8 @@ async function route(request, env) {
 
     return json({
       ok: true,
-      status: "delivered"
+      status:
+        "delivered"
     });
   }
 
@@ -1121,16 +1085,11 @@ async function route(request, env) {
     path === "/api/withdrawals" &&
     method === "POST"
   ) {
-    if (
-      user.role !== "seller"
-    ) {
-      return json(
-        {
-          error:
-            "Seller only"
-        },
-        403
-      );
+    if (user.role !== "seller") {
+      return json({
+        error:
+          "Seller only"
+      }, 403);
     }
 
     const body =
@@ -1154,26 +1113,20 @@ async function route(request, env) {
       amount < 10000 ||
       amount > Number(user.balance)
     ) {
-      return json(
-        {
-          error:
-            "Nominal withdrawal tidak valid"
-        },
-        400
-      );
+      return json({
+        error:
+          "Nominal withdrawal tidak valid"
+      }, 400);
     }
 
     if (
       !methodName ||
       !destination
     ) {
-      return json(
-        {
-          error:
-            "Metode dan tujuan wajib diisi"
-        },
-        400
-      );
+      return json({
+        error:
+          "Metode dan tujuan wajib diisi"
+      }, 400);
     }
 
     const withdrawalId =
@@ -1190,7 +1143,8 @@ async function route(request, env) {
         status,
         created_at
       )
-      VALUES (?, ?, ?, ?, ?, 'requested', ?)
+      VALUES
+      (?, ?, ?, ?, ?, 'requested', ?)
     `)
       .bind(
         withdrawalId,
@@ -1205,8 +1159,9 @@ async function route(request, env) {
     return json({
       ok: true,
       id: withdrawalId,
-      status: "requested"
-    });
+      status:
+        "requested"
+    }, 201);
   }
 
   // =========================
@@ -1217,16 +1172,11 @@ async function route(request, env) {
     path === "/api/admin/users" &&
     method === "GET"
   ) {
-    if (
-      !(await requireAdmin(user))
-    ) {
-      return json(
-        {
-          error:
-            "Admin only"
-        },
-        403
-      );
+    if (!isAdmin(user)) {
+      return json({
+        error:
+          "Admin only"
+      }, 403);
     }
 
     const result =
@@ -1246,18 +1196,22 @@ async function route(request, env) {
         .all();
 
     return json({
+      ok: true,
       users:
-        result.results
+        result.results || []
     });
   }
 
-  return json(
-    {
-      error:
-        "Endpoint tidak ditemukan"
-    },
-    404
-  );
+  // =========================
+  // NOT FOUND
+  // =========================
+
+  return json({
+    error:
+      "Endpoint tidak ditemukan",
+    path,
+    method
+  }, 404);
 }
 
 export default {
@@ -1270,15 +1224,12 @@ export default {
     } catch (error) {
       console.error(error);
 
-      return json(
-        {
-          error:
-            "Server error",
-          detail:
-            String(error)
-        },
-        500
-      );
+      return json({
+        error:
+          "Server error",
+        detail:
+          String(error)
+      }, 500);
     }
   }
 };
